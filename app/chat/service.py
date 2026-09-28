@@ -46,13 +46,17 @@ You are currently a conversational food assistant only.
 
 class ChatService:
 
-
     def __init__(self):
         self.model = create_model()
 
-        # Temporary in-memory conversation storage.
-        # Redis can replace this later.
-        self.conversations: dict[str, list[BaseMessage]] = {}
+        self.conversation_ttl = int(
+            os.getenv("CONVERSATION_TTL", "86400")
+        )
+
+    @staticmethod
+    def _redis_key(conversation_id: str) -> str:
+        return f"chat:conversation:{conversation_id}"
+
 
     async def chat(
         self,
@@ -60,8 +64,10 @@ class ChatService:
         user_message: str,
     ) -> str:
 
-        # Get existing conversation history.
-        history = self.conversations.get(conversation_id, [])
+        key = self._redis_key(conversation_id)
+
+        # Load previous conversation history from Redis.
+        history = await self._get_history(key)
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
@@ -75,13 +81,28 @@ class ChatService:
         # Extract response text.
         response_text = self._extract_text(response)
 
-        # Save the conversation.
-        history.append(HumanMessage(content=user_message))
-        history.append(AIMessage(content=response_text))
+        # Save the user's message.
+        await self._save_message(
+            key,
+            HumanMessage(content=user_message),
+        )
 
-        self.conversations[conversation_id] = history
+        # Save the assistant's response.
+        await self._save_message(
+            key,
+            AIMessage(content=response_text),
+        )
 
         return response_text
+
+    async def conversation_exists(
+            self,
+            conversation_id: str,
+    ) -> bool:
+
+        key = self._redis_key(conversation_id)
+
+        return await redis_client.exists(key) > 0
 
     @staticmethod
     async def _get_history(key: str, ) -> list[BaseMessage]:
@@ -96,10 +117,10 @@ class ChatService:
         return history
 
     @staticmethod
-    async def _save_message(key: str, message: BaseMessage, ):
+    async def _save_message(self, key: str, message: BaseMessage, ):
         data = {"type": message.type, "content": message.content, }
         await redis_client.rpush(key, json.dumps(data))
-        await redis_client.expire(key, os.getenv("CONVERSATION_TTL"))
+        await redis_client.expire(key, self.conversation_ttl)
 
     @staticmethod
     def _extract_text(response) -> str:
