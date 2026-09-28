@@ -5,9 +5,13 @@ from langchain_core.messages import (
     SystemMessage,
 )
 
+import json
+from app.core.redis import redis_client
 from app.llm.model import create_model
+from dotenv import load_dotenv
+import os
 
-
+load_dotenv()
 SYSTEM_PROMPT = """
 You are the Food To Eat assistant.
 
@@ -41,6 +45,7 @@ You are currently a conversational food assistant only.
 
 
 class ChatService:
+
 
     def __init__(self):
         self.model = create_model()
@@ -79,22 +84,36 @@ class ChatService:
         return response_text
 
     @staticmethod
+    async def _get_history(key: str, ) -> list[BaseMessage]:
+        raw_messages = await redis_client.lrange(key, 0, -1)
+        history = []
+        for raw_message in raw_messages:
+            message = json.loads(raw_message)
+            if message["type"] == "human":
+                history.append(HumanMessage(content=message["content"]))
+            elif message["type"] == "ai":
+                history.append(AIMessage(content=message["content"]))
+        return history
+
+    @staticmethod
+    async def _save_message(key: str, message: BaseMessage, ):
+        data = {"type": message.type, "content": message.content, }
+        await redis_client.rpush(key, json.dumps(data))
+        await redis_client.expire(key, os.getenv("CONVERSATION_TTL"))
+
+    @staticmethod
     def _extract_text(response) -> str:
         content = response.content
-
         if isinstance(content, str):
             return content.strip()
 
         if isinstance(content, list):
             parts = []
-
             for item in content:
                 if isinstance(item, str):
                     parts.append(item)
-
                 elif isinstance(item, dict) and item.get("text"):
                     parts.append(item["text"])
-
             return "".join(parts).strip()
-
         return str(content).strip()
+
